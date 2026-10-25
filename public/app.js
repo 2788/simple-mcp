@@ -3,25 +3,22 @@ const connectForm = document.querySelector("#connect-form");
 const connectButton = document.querySelector("#connect");
 const disconnectButton = document.querySelector("#disconnect");
 const refreshButton = document.querySelector("#refresh-tools");
-const transportSelect = document.querySelector("#transport");
 const toolsEl = document.querySelector("#tools");
 const resultEl = document.querySelector("#result");
 const logEl = document.querySelector("#log");
-const endpointLabelEl = document.querySelector("#endpoint-label");
-const endpointEl = document.querySelector("#sse-url");
 const messageUrlEl = document.querySelector("#message-url");
 const serverInfoEl = document.querySelector("#server-info");
+const transportSelect = document.querySelector("#transport");
+const endpointEl = document.querySelector("#sse-url");
 
 const transportHints = {
   sse: ["HTTP + SSE", "GET /mcp", "等待 endpoint 事件"],
   streamable: ["Streamable HTTP", "POST /mcp", "初始化后获得 Mcp-Session-Id"],
-  websocket: ["WebSocket", "WS /mcp/ws", "每个文本帧是一条 JSON-RPC"],
 };
 
 const state = {
   mode: "sse",
   abort: null,
-  socket: null,
   endpoint: "",
   sessionId: "",
   protocolVersion: "",
@@ -76,7 +73,7 @@ function log(direction, title, payload) {
 
 function syncTransportHint() {
   const [label, endpoint, message] = transportHints[transportSelect.value];
-  endpointLabelEl.textContent = label;
+  document.querySelector("#endpoint-label").textContent = label;
   endpointEl.textContent = endpoint;
   if (!state.ready) messageUrlEl.textContent = message;
 }
@@ -92,10 +89,6 @@ async function connect() {
     state.endpoint = "/mcp";
     messageUrlEl.textContent = "POST /mcp";
     await handshake("2025-03-26");
-    return;
-  }
-  if (mode === "websocket") {
-    connectWebSocket();
     return;
   }
   await connectSse();
@@ -129,37 +122,6 @@ async function connectSse() {
   }, 8000);
   abort.signal.addEventListener("abort", () => clearTimeout(endpointTimer));
   void readStream(response.body, abort).finally(() => clearTimeout(endpointTimer));
-}
-
-function connectWebSocket() {
-  const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-  const params = new URLSearchParams({
-    deviceId: document.querySelector("#device-id").value.trim(),
-    agentId: document.querySelector("#agent-id").value.trim(),
-    sessionId: document.querySelector("#session-id").value.trim(),
-  });
-  const socket = new WebSocket(`${protocol}//${location.host}/mcp/ws?${params}`, "mcp");
-  state.socket = socket;
-  state.endpoint = "/mcp/ws";
-  messageUrlEl.textContent = "WS /mcp/ws";
-  socket.addEventListener("open", () => {
-    void handshake("2025-03-26");
-  });
-  socket.addEventListener("message", (event) => {
-    try {
-      deliver(JSON.parse(event.data));
-    } catch {
-      log("in", "无法解析的消息", event.data);
-    }
-  });
-  socket.addEventListener("close", () => {
-    if (state.socket !== socket) return;
-    disconnect("连接已关闭");
-  });
-  socket.addEventListener("error", () => {
-    if (state.socket !== socket) return;
-    fail("WebSocket 连接失败");
-  });
 }
 
 async function readStream(body, abort) {
@@ -314,19 +276,10 @@ function waitFor(id) {
 }
 
 async function post(body) {
-  if (state.mode === "websocket") {
-    if (!state.socket || state.socket.readyState !== WebSocket.OPEN) {
-      throw new Error("WebSocket 未连接");
-    }
-    state.socket.send(JSON.stringify(body));
-    return;
-  }
-
   if (state.mode === "streamable") {
     await postStreamable(body);
     return;
   }
-
   if (!state.endpoint) throw new Error("还没有消息地址");
   const response = await fetch(state.endpoint, {
     method: "POST",
@@ -431,7 +384,7 @@ function renderTools(tools) {
     if (!fields.length) {
       const hint = document.createElement("p");
       hint.className = "hint";
-      hint.textContent = "这个工具没有参数。";
+      hint.textContent = "这个工具没有参数，会播放固定歌曲「夜上海」。";
       form.append(hint);
     }
 
@@ -441,7 +394,6 @@ function renderTools(tools) {
       const input = document.createElement("input");
       input.name = field.name;
       input.placeholder = field.description || field.type;
-      if (field.name === "title") input.value = "夜上海";
       label.append(input);
       if (field.description) {
         const hint = document.createElement("span");
@@ -544,9 +496,6 @@ function disconnect(label, options = {}) {
   const protocolVersion = state.protocolVersion;
   state.abort?.abort();
   state.abort = null;
-  const socket = state.socket;
-  state.socket = null;
-  socket?.close();
   state.endpoint = "";
   state.sessionId = "";
   state.protocolVersion = "";
@@ -562,7 +511,6 @@ function disconnect(label, options = {}) {
   refreshButton.disabled = true;
   disconnectButton.disabled = true;
   connectButton.disabled = false;
-  toolsEl.replaceChildren(paragraph("连接后会自动发送 tools/list。"));
   if (mode === "streamable" && sessionId) {
     fetch("/mcp", {
       method: "DELETE",
@@ -573,6 +521,7 @@ function disconnect(label, options = {}) {
       },
     }).catch(() => {});
   }
+  toolsEl.replaceChildren(paragraph("连接后会自动发送 tools/list。"));
   if (!options.silent) setStatus(label, label === "已断开" ? "idle" : "error");
 }
 
