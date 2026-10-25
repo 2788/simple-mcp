@@ -465,6 +465,15 @@ function renderResult(result) {
     message.textContent = structured.message;
     resultEl.append(message);
   }
+  if (structured.speak) {
+    const speak = document.createElement("p");
+    speak.className = "game-speak";
+    const delay = structured.speak_delay_seconds;
+    speak.textContent = delay
+      ? `录音结束后静默 ${delay} 秒，再朗读：${structured.speak}`
+      : structured.speak;
+    resultEl.append(speak);
+  }
 
   const options = structured.options;
   if (Array.isArray(options) && options.length) {

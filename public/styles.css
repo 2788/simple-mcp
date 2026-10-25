@@ -238,10 +238,17 @@ button.primary,
 
 .result { display: grid; gap: 12px; }
 
-.game-message {
+.game-message,
+.game-speak {
   margin: 0;
   line-height: 1.6;
   white-space: pre-wrap;
+}
+
+.game-speak {
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: #f4faf7;
 }
 
 .choices { display: grid; gap: 8px; }

@@ -20,10 +20,12 @@ from starlette.types import Receive, Scope, Send
 TRACK_TITLE = "夜上海"
 TRACK_URL = "http://music-storage.xrobo-io.qiniuapi.com/夜上海.mp3"
 # 音频根地址。换成真实地址时只改这一行，结尾不要加斜杠。
-AUDIO_BASE_URL = "https://static.sufy.com/tmp"
+AUDIO_BASE_URL = "https://qmall-static.qnssl.com/tmp"
 SSE_PATH = "/mcp"
 MESSAGE_PATH = "/mcp/message/"
 
+GAME_NAME = "二哈有福"
+SPEAK_DELAY_SECONDS = 3
 # 选择目前只被记录，不会改变后续音频。
 ROUNDS = (
     {
@@ -107,9 +109,17 @@ GAME_OUTPUT_SCHEMA = {
         },
         "awaiting_choice": {
             "type": "boolean",
-            "description": "为 true 时要展示选项并等待用户选择",
+            "description": "为 true 时要朗读选项并等待用户选择",
         },
         "finished": {"type": "boolean", "description": "为 true 时游戏已经结束"},
+        "speak": {
+            "type": "string",
+            "description": "录音结束并静默 3 秒后，智能体要原文朗读的唯一一句；空字符串表示不要朗读",
+        },
+        "speak_delay_seconds": {
+            "type": "integer",
+            "description": "录音全部播放完后，朗读 speak 之前要静默的秒数",
+        },
     },
     "required": [
         "code",
@@ -120,6 +130,8 @@ GAME_OUTPUT_SCHEMA = {
         "choices",
         "awaiting_choice",
         "finished",
+        "speak",
+        "speak_delay_seconds",
     ],
 }
 
@@ -176,41 +188,49 @@ def _play_funcs(spec: dict) -> list[dict]:
                 "name": "linx_play",
                 "arguments": {
                     "audio_url": _audio_url(filename),
-                    "title": f"{spec['title']} {index}/{total} {stem}",
+                    "title": f"{GAME_NAME} {spec['title']} {index}/{total} {stem}",
                 },
             }
         )
     return funcs
 
 
+_SPOKEN_NUMBERS = ("第一", "第二", "第三", "第四", "第五", "第六")
+
+
 def _option_lines(options: tuple[str, ...]) -> str:
     return "\n".join(f"{index}. {text}" for index, text in enumerate(options, start=1))
 
 
+def _speak_text(options: tuple[str, ...]) -> str:
+    if not options:
+        return ""
+    parts = [f"{_SPOKEN_NUMBERS[index]}，{text}" for index, text in enumerate(options)]
+    return "你可以选择：" + "。".join(parts) + "。"
+
+
 def _round_message(round_no: int, choices: list[int]) -> str:
     spec = ROUNDS[round_no - 1]
-    lines = []
+    lines = [
+        f"设备正在按 funcs 播放《{GAME_NAME}》{spec['title']}的录音。",
+        "播放过程中不要说话，不要答应，不要解释，也不要复述剧情。",
+    ]
     if choices:
         previous = ROUNDS[round_no - 2]
         picked = choices[-1]
         lines.append(
-            f"已记录{previous['title']}的选择：{picked}. {previous['options'][picked - 1]}。"
+            f"上一回合已记录的选择是 {picked}. {previous['options'][picked - 1]}。这句话不要说给用户。"
         )
-    lines.append(
-        f"{spec['title']}的音频会由设备按 funcs 顺序自动播放。"
-        "播放期间不要说话，也不要复述音频内容。"
-    )
     if spec["options"]:
-        lines.append("播放结束后，把下面的选项原文一次展示给用户，不要改写，然后等待用户自己选择：")
-        lines.append(_option_lines(spec["options"]))
         lines.append(
-            "用户选定后，调用 submit_dialogue_choice，choice 传入对应编号。不要替用户选择。"
+            f"录音全部播放完后，先安静 {SPEAK_DELAY_SECONDS} 秒，然后只朗读 speak 原文，不要改字，不要加开场白。"
         )
+        lines.append("朗读结束后立刻停止说话，等待用户自己选择。用户选定后，再调用 submit_dialogue_choice。")
     else:
         lines.append(
-            "这一回合没有选项。播放结束后游戏结束，不要调用 submit_dialogue_choice。"
-            "用户如果想再玩一次，调用 start_dialogue_game。"
+            f"录音全部播放完后，再安静 {SPEAK_DELAY_SECONDS} 秒。这一回合没有选项，speak 为空，不要朗读，也不要总结。"
         )
+        lines.append(f"《{GAME_NAME}》到此结束。用户想再玩时，调用 start_dialogue_game。")
     return "\n".join(lines)
 
 
@@ -223,6 +243,7 @@ def _game_payload(
     choices: list[int],
     awaiting_choice: bool,
     finished: bool,
+    speak: str,
     funcs: list[dict] | None = None,
 ) -> dict:
     return {
@@ -234,6 +255,8 @@ def _game_payload(
         "choices": list(choices),
         "awaiting_choice": awaiting_choice,
         "finished": finished,
+        "speak": speak,
+        "speak_delay_seconds": SPEAK_DELAY_SECONDS,
     }
 
 
@@ -263,6 +286,7 @@ def begin_dialogue(session_key: str) -> dict:
         choices=[],
         awaiting_choice=True,
         finished=False,
+        speak=_speak_text(spec["options"]),
         funcs=_play_funcs(spec),
     )
 
@@ -272,24 +296,26 @@ def record_dialogue_choice(session_key: str, choice: int) -> tuple[dict, bool]:
     if game is None:
         payload = _game_payload(
             code=1,
-            message="游戏还没开始。请先调用 start_dialogue_game。",
+            message=f"《{GAME_NAME}》还没开始。请先调用 start_dialogue_game。现在不要朗读选项。",
             round_no=0,
             options=(),
             choices=[],
             awaiting_choice=False,
             finished=False,
+            speak="",
         )
         return payload, True
 
     if game["finished"]:
         payload = _game_payload(
             code=1,
-            message="游戏已经结束。不要再提交选项。用户如果想再玩一次，调用 start_dialogue_game。",
+            message=f"《{GAME_NAME}》已经结束。不要再朗读选项，也不要提交。用户如果想再玩一次，调用 start_dialogue_game。",
             round_no=game["round"],
             options=(),
             choices=game["choices"],
             awaiting_choice=False,
             finished=True,
+            speak="",
         )
         return payload, True
 
@@ -299,20 +325,21 @@ def record_dialogue_choice(session_key: str, choice: int) -> tuple[dict, bool]:
         game["finished"] = True
         payload = _game_payload(
             code=1,
-            message="这一回合没有选项，游戏已经结束。用户如果想再玩一次，调用 start_dialogue_game。",
+            message=f"这一回合没有选项，《{GAME_NAME}》已经结束。不要朗读。用户如果想再玩一次，调用 start_dialogue_game。",
             round_no=game["round"],
             options=(),
             choices=game["choices"],
             awaiting_choice=False,
             finished=True,
+            speak="",
         )
         return payload, True
     if choice < 1 or choice > option_count:
         payload = _game_payload(
             code=1,
             message=(
-                f"选项编号无效。请让用户从 1 到 {option_count} 里重新选择，"
-                "然后调用 submit_dialogue_choice：\n"
+                f"选项编号无效。现在没有录音在播放，请直接朗读 speak 原文，"
+                f"然后等待用户从 1 到 {option_count} 里重新选择：\n"
                 f"{_option_lines(spec['options'])}"
             ),
             round_no=game["round"],
@@ -320,6 +347,7 @@ def record_dialogue_choice(session_key: str, choice: int) -> tuple[dict, bool]:
             choices=game["choices"],
             awaiting_choice=True,
             finished=False,
+            speak=_speak_text(spec["options"]),
         )
         return payload, True
 
@@ -335,6 +363,7 @@ def record_dialogue_choice(session_key: str, choice: int) -> tuple[dict, bool]:
         choices=game["choices"],
         awaiting_choice=not game["finished"],
         finished=game["finished"],
+        speak=_speak_text(next_spec["options"]),
         funcs=_play_funcs(next_spec),
     )
     return payload, False
@@ -342,19 +371,19 @@ def record_dialogue_choice(session_key: str, choice: int) -> tuple[dict, bool]:
 
 @mcp.tool(
     name="start_dialogue_game",
-    title="开始对话选择游戏",
+    title="开始《二哈有福》",
     description=(
-        "开始或重新开始对话选择游戏。游戏共三个回合，内容是预先录制的音频。"
-        "调用后设备会按 funcs 顺序播放第一回合音频。"
-        "播放期间不要说话，也不要复述音频。"
-        "播放结束后，把返回的 options 原文一次展示给用户，等待用户自己选择。"
-        "用户选定后调用 submit_dialogue_choice，choice 传入选项编号。"
-        "重新调用本工具会清空当前进度，从第一回合再开始。"
+        "开始或重新开始游戏《二哈有福》。游戏共三个回合，内容是预先录制的音频。"
+        "调用后设备按 funcs 播放第一回合录音。"
+        "播放过程中你必须保持沉默，不要输出任何对用户说的话。"
+        "录音全部播放完后，先安静 3 秒，然后只朗读结果里的 speak 原文。"
+        "朗读完就停下，等待用户自己选择。用户选择后才调用 submit_dialogue_choice。"
+        "再次调用会从第一回合重新开始。"
     ),
     output_schema=GAME_OUTPUT_SCHEMA,
 )
 def start_dialogue_game() -> ToolResult:
-    """开始或重新开始对话选择游戏，并播放第一回合。"""
+    """开始或重新开始《二哈有福》，并播放第一回合。"""
     headers, session_key = _caller()
     logger.info(
         "start_dialogue_game device=%s agent=%s session=%s",
@@ -367,14 +396,14 @@ def start_dialogue_game() -> ToolResult:
 
 @mcp.tool(
     name="submit_dialogue_choice",
-    title="提交对话选项",
+    title="提交《二哈有福》的选项",
     description=(
-        "提交用户在当前回合选择的编号，并进入下一回合。"
-        "choice 从 1 开始，对应当前 options 的顺序，必须是用户自己做出的选择。"
+        "提交用户在《二哈有福》当前回合选择的编号，并播放下一回合录音。"
+        "choice 从 1 开始，对应当前选项顺序，必须是用户自己做出的选择。"
         "第一回合编号是 1 到 4，第二回合编号是 1 到 3。"
-        "调用后设备按 funcs 播放下一回合音频；播放期间不要说话。"
-        "如果返回的 options 不为空，播放结束后继续原文展示并等待选择。"
-        "第三回合没有选项，播放结束即游戏结束，不要再次调用本工具。"
+        "调用后设备按 funcs 播放录音。播放过程中你必须保持沉默，不要说话。"
+        "录音全部播放完后，先安静 3 秒。若 speak 不为空，只朗读 speak 原文，然后等待用户选择。"
+        "若 speak 为空，第三回合已经结束，不要朗读，也不要再次调用本工具。"
         "游戏还没开始时，先调用 start_dialogue_game。"
     ),
     output_schema=GAME_OUTPUT_SCHEMA,
