@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>simple-mcp 测试台</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="top">
+      <div>
+        <p class="eyebrow">simple-mcp</p>
+        <h1>测试台</h1>
+      </div>
+      <p id="status" class="status" data-state="idle">未连接</p>
+    </header>
+
+    <main class="layout">
+      <section class="panel" aria-labelledby="conn-title">
+        <div class="panel-head">
+          <h2 id="conn-title">连接</h2>
+        </div>
+        <form id="connect-form" class="stack">
+          <label>
+            传输方式
+            <select id="transport">
+              <option value="sse">HTTP + SSE</option>
+              <option value="streamable">Streamable HTTP</option>
+              <option value="websocket">WebSocket</option>
+            </select>
+          </label>
+          <label>
+            设备 ID
+            <input id="device-id" name="deviceId" value="device-demo" autocomplete="off" />
+          </label>
+          <label>
+            智能体 ID
+            <input id="agent-id" name="agentId" value="agent-demo" autocomplete="off" />
+          </label>
+          <label>
+            会话 ID
+            <input id="session-id" name="sessionId" value="session-demo" autocomplete="off" />
+          </label>
+          <div class="row">
+            <button id="connect" type="submit">连接</button>
+            <button id="disconnect" type="button" disabled>断开</button>
+          </div>
+        </form>
+        <dl class="meta">
+          <div>
+            <dt id="endpoint-label">端点</dt>
+            <dd id="sse-url">GET /mcp</dd>
+          </div>
+          <div>
+            <dt>消息地址</dt>
+            <dd id="message-url">等待 endpoint 事件</dd>
+          </div>
+          <div>
+            <dt>服务</dt>
+            <dd id="server-info">尚未 initialize</dd>
+          </div>
+        </dl>
+      </section>
+
+      <section class="panel panel-tools" aria-labelledby="tools-title">
+        <div class="panel-head">
+          <h2 id="tools-title">工具</h2>
+          <button id="refresh-tools" type="button" disabled>重新获取 tools/list</button>
+        </div>
+        <div id="tools" class="tools">
+          <p class="empty">连接后会自动发送 <code>tools/list</code>。</p>
+        </div>
+      </section>
+
+      <section class="panel panel-result" aria-labelledby="result-title">
+        <div class="panel-head">
+          <h2 id="result-title">调用结果</h2>
+        </div>
+        <div id="result" class="result">
+          <p class="empty">调用工具后，这里显示 <code>content</code> 和 <code>structuredContent</code>。</p>
+        </div>
+      </section>
+
+      <section class="panel panel-log" aria-labelledby="log-title">
+        <div class="panel-head">
+          <h2 id="log-title">协议日志</h2>
+          <button id="clear-log" type="button">清空</button>
+        </div>
+        <ol id="log" class="log"></ol>
+      </section>
+    </main>
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>
