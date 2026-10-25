@@ -133,7 +133,7 @@ async function readStream(body, abort) {
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
-      buffer += decoder.decode(value, { stream: true });
+      buffer = (buffer + decoder.decode(value, { stream: true })).replace(/\r\n/g, "\n");
       let splitAt;
       while ((splitAt = buffer.indexOf("\n\n")) !== -1) {
         const raw = buffer.slice(0, splitAt);
@@ -337,7 +337,7 @@ async function consumeSse(response) {
   while (true) {
     const { value, done } = await reader.read();
     if (done) break;
-    buffer += decoder.decode(value, { stream: true });
+    buffer = (buffer + decoder.decode(value, { stream: true })).replace(/\r\n/g, "\n");
     let splitAt;
     while ((splitAt = buffer.indexOf("\n\n")) !== -1) {
       const raw = buffer.slice(0, splitAt);
@@ -384,7 +384,7 @@ function renderTools(tools) {
     if (!fields.length) {
       const hint = document.createElement("p");
       hint.className = "hint";
-      hint.textContent = "这个工具没有参数，会播放固定歌曲「夜上海」。";
+      hint.textContent = "这个工具没有参数。";
       form.append(hint);
     }
 
@@ -394,6 +394,12 @@ function renderTools(tools) {
       const input = document.createElement("input");
       input.name = field.name;
       input.placeholder = field.description || field.type;
+      if (field.type === "integer" || field.type === "number") {
+        input.type = "number";
+        input.inputMode = "numeric";
+        if (field.minimum != null) input.min = String(field.minimum);
+        if (field.maximum != null) input.max = String(field.maximum);
+      }
       label.append(input);
       if (field.description) {
         const hint = document.createElement("span");
@@ -417,7 +423,13 @@ function renderTools(tools) {
       for (const field of fields) {
         const value = new FormData(form).get(field.name);
         const text = typeof value === "string" ? value.trim() : "";
-        if (text) args[field.name] = text;
+        if (!text) continue;
+        if (field.type === "integer" || field.type === "number") {
+          const number = Number(text);
+          if (!Number.isNaN(number)) args[field.name] = number;
+          continue;
+        }
+        args[field.name] = text;
       }
       void callTool(tool.name, args);
     });
@@ -434,6 +446,8 @@ function schemaFields(schema) {
     required: required.has(name),
     description: property.description || "",
     type: property.type || "string",
+    minimum: property.minimum,
+    maximum: property.maximum,
   }));
 }
 
@@ -444,7 +458,33 @@ function renderResult(result) {
   banner.textContent = result.isError ? "工具返回 isError: true" : "工具返回 isError: false";
   resultEl.append(banner);
 
-  const funcs = result.structuredContent?.funcs;
+  const structured = result.structuredContent || {};
+  if (structured.message) {
+    const message = document.createElement("p");
+    message.className = "game-message";
+    message.textContent = structured.message;
+    resultEl.append(message);
+  }
+
+  const options = structured.options;
+  if (Array.isArray(options) && options.length) {
+    const list = document.createElement("div");
+    list.className = "choices";
+    options.forEach((text, index) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = `${index + 1}. ${text}`;
+      button.disabled = structured.awaiting_choice !== true;
+      button.addEventListener("click", () => {
+        for (const node of list.querySelectorAll("button")) node.disabled = true;
+        void callTool("submit_dialogue_choice", { choice: index + 1 });
+      });
+      list.append(button);
+    });
+    resultEl.append(list);
+  }
+
+  const funcs = structured.funcs;
   if (Array.isArray(funcs) && funcs.length) {
     const list = document.createElement("div");
     list.className = "funcs";

@@ -3,12 +3,15 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Annotated
+from urllib.parse import quote
 
 import uvicorn
 from fastmcp import FastMCP
 from fastmcp.server.dependencies import get_http_headers
 from fastmcp.server.http import create_sse_app, create_streamable_http_app
 from fastmcp.tools import ToolResult
+from pydantic import Field
 from starlette.applications import Starlette
 from starlette.routing import Mount
 from starlette.staticfiles import StaticFiles
@@ -16,13 +19,56 @@ from starlette.types import Receive, Scope, Send
 
 TRACK_TITLE = "夜上海"
 TRACK_URL = "http://music-storage.xrobo-io.qiniuapi.com/夜上海.mp3"
+# 音频根地址。换成真实地址时只改这一行，结尾不要加斜杠。
+AUDIO_BASE_URL = "https://static.sufy.com/tmp"
 SSE_PATH = "/mcp"
 MESSAGE_PATH = "/mcp/message/"
+
+# 选择目前只被记录，不会改变后续音频。
+ROUNDS = (
+    {
+        "title": "第一回合",
+        "audios": ("1.mp3", "2.mp3", "3.mp3", "4.mp3", "5.mp3"),
+        "options": ("沉默不语", "忽略她，直接路过", "怼回去", "先道歉"),
+    },
+    {
+        "title": "第二回合",
+        "audios": ("6.mp3", "7.mp3", "8.mp3", "waigua.mp3", "9.mp3"),
+        "options": ("立界，硬挡这一击", "借势，把礼堂的钟声引过来", "先道歉，记住这次屈辱"),
+    },
+    {
+        "title": "第三回合",
+        "audios": ("10.mp3", "11.mp3", "nanzhu-1.mp3"),
+        "options": (),
+    },
+)
+
+# 按会话保存进度。进程内有效，重启后清空。
+_games: dict[str, dict] = {}
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger("simple-mcp")
 
 mcp = FastMCP("simple-mcp", version="1.0.0")
+
+PLAY_FUNC_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "name": {
+            "type": "string",
+            "description": "系统函数名，播放时为 linx_play",
+        },
+        "arguments": {
+            "type": "object",
+            "properties": {
+                "audio_url": {"type": "string"},
+                "title": {"type": "string"},
+            },
+            "required": ["audio_url", "title"],
+        },
+    },
+    "required": ["name", "arguments"],
+}
 
 OUTPUT_SCHEMA = {
     "type": "object",
@@ -32,27 +78,49 @@ OUTPUT_SCHEMA = {
         "funcs": {
             "type": "array",
             "description": "设备按顺序执行的系统调用",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "系统函数名，播放时为 linx_play",
-                    },
-                    "arguments": {
-                        "type": "object",
-                        "properties": {
-                            "audio_url": {"type": "string"},
-                            "title": {"type": "string"},
-                        },
-                        "required": ["audio_url", "title"],
-                    },
-                },
-                "required": ["name", "arguments"],
-            },
+            "items": PLAY_FUNC_SCHEMA,
         },
     },
     "required": ["code", "message", "funcs"],
+}
+
+GAME_OUTPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "code": {"type": "integer", "description": "0 表示成功"},
+        "message": {"type": "string", "description": "给智能体的下一步说明"},
+        "funcs": {
+            "type": "array",
+            "description": "设备按顺序执行的系统调用",
+            "items": PLAY_FUNC_SCHEMA,
+        },
+        "round": {"type": "integer", "description": "当前回合，从 1 开始；还没开始时为 0"},
+        "options": {
+            "type": "array",
+            "description": "播放结束后要原文展示给用户的选项；空数组表示本回合没有选项",
+            "items": {"type": "string"},
+        },
+        "choices": {
+            "type": "array",
+            "description": "用户已经做出的选择编号，按回合顺序",
+            "items": {"type": "integer"},
+        },
+        "awaiting_choice": {
+            "type": "boolean",
+            "description": "为 true 时要展示选项并等待用户选择",
+        },
+        "finished": {"type": "boolean", "description": "为 true 时游戏已经结束"},
+    },
+    "required": [
+        "code",
+        "message",
+        "funcs",
+        "round",
+        "options",
+        "choices",
+        "awaiting_choice",
+        "finished",
+    ],
 }
 
 
@@ -92,6 +160,246 @@ def play_music() -> ToolResult:
         content=json.dumps(payload, ensure_ascii=False, indent=2),
         structured_content=payload,
     )
+
+
+def _audio_url(filename: str) -> str:
+    return f"{AUDIO_BASE_URL.rstrip('/')}/{quote(filename)}"
+
+
+def _play_funcs(spec: dict) -> list[dict]:
+    total = len(spec["audios"])
+    funcs = []
+    for index, filename in enumerate(spec["audios"], start=1):
+        stem = filename.removesuffix(".mp3")
+        funcs.append(
+            {
+                "name": "linx_play",
+                "arguments": {
+                    "audio_url": _audio_url(filename),
+                    "title": f"{spec['title']} {index}/{total} {stem}",
+                },
+            }
+        )
+    return funcs
+
+
+def _option_lines(options: tuple[str, ...]) -> str:
+    return "\n".join(f"{index}. {text}" for index, text in enumerate(options, start=1))
+
+
+def _round_message(round_no: int, choices: list[int]) -> str:
+    spec = ROUNDS[round_no - 1]
+    lines = []
+    if choices:
+        previous = ROUNDS[round_no - 2]
+        picked = choices[-1]
+        lines.append(
+            f"已记录{previous['title']}的选择：{picked}. {previous['options'][picked - 1]}。"
+        )
+    lines.append(
+        f"{spec['title']}的音频会由设备按 funcs 顺序自动播放。"
+        "播放期间不要说话，也不要复述音频内容。"
+    )
+    if spec["options"]:
+        lines.append("播放结束后，把下面的选项原文一次展示给用户，不要改写，然后等待用户自己选择：")
+        lines.append(_option_lines(spec["options"]))
+        lines.append(
+            "用户选定后，调用 submit_dialogue_choice，choice 传入对应编号。不要替用户选择。"
+        )
+    else:
+        lines.append(
+            "这一回合没有选项。播放结束后游戏结束，不要调用 submit_dialogue_choice。"
+            "用户如果想再玩一次，调用 start_dialogue_game。"
+        )
+    return "\n".join(lines)
+
+
+def _game_payload(
+    *,
+    code: int,
+    message: str,
+    round_no: int,
+    options: tuple[str, ...] | list[str],
+    choices: list[int],
+    awaiting_choice: bool,
+    finished: bool,
+    funcs: list[dict] | None = None,
+) -> dict:
+    return {
+        "code": code,
+        "message": message,
+        "funcs": funcs or [],
+        "round": round_no,
+        "options": list(options),
+        "choices": list(choices),
+        "awaiting_choice": awaiting_choice,
+        "finished": finished,
+    }
+
+
+def _game_result(payload: dict, *, is_error: bool = False) -> ToolResult:
+    return ToolResult(
+        content=json.dumps(payload, ensure_ascii=False, indent=2),
+        structured_content=payload,
+        is_error=is_error,
+    )
+
+
+def _caller() -> tuple[dict, str]:
+    headers = get_http_headers(include_all=True)
+    session = headers.get("x-linx-session-id", "").strip()
+    device = headers.get("x-linx-device-id", "").strip()
+    return headers, session or device or "local"
+
+
+def begin_dialogue(session_key: str) -> dict:
+    _games[session_key] = {"round": 1, "choices": [], "finished": False}
+    spec = ROUNDS[0]
+    return _game_payload(
+        code=0,
+        message=_round_message(1, []),
+        round_no=1,
+        options=spec["options"],
+        choices=[],
+        awaiting_choice=True,
+        finished=False,
+        funcs=_play_funcs(spec),
+    )
+
+
+def record_dialogue_choice(session_key: str, choice: int) -> tuple[dict, bool]:
+    game = _games.get(session_key)
+    if game is None:
+        payload = _game_payload(
+            code=1,
+            message="游戏还没开始。请先调用 start_dialogue_game。",
+            round_no=0,
+            options=(),
+            choices=[],
+            awaiting_choice=False,
+            finished=False,
+        )
+        return payload, True
+
+    if game["finished"]:
+        payload = _game_payload(
+            code=1,
+            message="游戏已经结束。不要再提交选项。用户如果想再玩一次，调用 start_dialogue_game。",
+            round_no=game["round"],
+            options=(),
+            choices=game["choices"],
+            awaiting_choice=False,
+            finished=True,
+        )
+        return payload, True
+
+    spec = ROUNDS[game["round"] - 1]
+    option_count = len(spec["options"])
+    if option_count == 0:
+        game["finished"] = True
+        payload = _game_payload(
+            code=1,
+            message="这一回合没有选项，游戏已经结束。用户如果想再玩一次，调用 start_dialogue_game。",
+            round_no=game["round"],
+            options=(),
+            choices=game["choices"],
+            awaiting_choice=False,
+            finished=True,
+        )
+        return payload, True
+    if choice < 1 or choice > option_count:
+        payload = _game_payload(
+            code=1,
+            message=(
+                f"选项编号无效。请让用户从 1 到 {option_count} 里重新选择，"
+                "然后调用 submit_dialogue_choice：\n"
+                f"{_option_lines(spec['options'])}"
+            ),
+            round_no=game["round"],
+            options=spec["options"],
+            choices=game["choices"],
+            awaiting_choice=True,
+            finished=False,
+        )
+        return payload, True
+
+    game["choices"].append(choice)
+    game["round"] += 1
+    next_spec = ROUNDS[game["round"] - 1]
+    game["finished"] = not next_spec["options"]
+    payload = _game_payload(
+        code=0,
+        message=_round_message(game["round"], game["choices"]),
+        round_no=game["round"],
+        options=next_spec["options"],
+        choices=game["choices"],
+        awaiting_choice=not game["finished"],
+        finished=game["finished"],
+        funcs=_play_funcs(next_spec),
+    )
+    return payload, False
+
+
+@mcp.tool(
+    name="start_dialogue_game",
+    title="开始对话选择游戏",
+    description=(
+        "开始或重新开始对话选择游戏。游戏共三个回合，内容是预先录制的音频。"
+        "调用后设备会按 funcs 顺序播放第一回合音频。"
+        "播放期间不要说话，也不要复述音频。"
+        "播放结束后，把返回的 options 原文一次展示给用户，等待用户自己选择。"
+        "用户选定后调用 submit_dialogue_choice，choice 传入选项编号。"
+        "重新调用本工具会清空当前进度，从第一回合再开始。"
+    ),
+    output_schema=GAME_OUTPUT_SCHEMA,
+)
+def start_dialogue_game() -> ToolResult:
+    """开始或重新开始对话选择游戏，并播放第一回合。"""
+    headers, session_key = _caller()
+    logger.info(
+        "start_dialogue_game device=%s agent=%s session=%s",
+        headers.get("x-linx-device-id", ""),
+        headers.get("x-linx-agent-id", ""),
+        headers.get("x-linx-session-id", ""),
+    )
+    return _game_result(begin_dialogue(session_key))
+
+
+@mcp.tool(
+    name="submit_dialogue_choice",
+    title="提交对话选项",
+    description=(
+        "提交用户在当前回合选择的编号，并进入下一回合。"
+        "choice 从 1 开始，对应当前 options 的顺序，必须是用户自己做出的选择。"
+        "第一回合编号是 1 到 4，第二回合编号是 1 到 3。"
+        "调用后设备按 funcs 播放下一回合音频；播放期间不要说话。"
+        "如果返回的 options 不为空，播放结束后继续原文展示并等待选择。"
+        "第三回合没有选项，播放结束即游戏结束，不要再次调用本工具。"
+        "游戏还没开始时，先调用 start_dialogue_game。"
+    ),
+    output_schema=GAME_OUTPUT_SCHEMA,
+)
+def submit_dialogue_choice(
+    choice: Annotated[
+        int,
+        Field(
+            ge=1,
+            le=4,
+            description="用户选择的编号。第一回合为 1 到 4，第二回合为 1 到 3",
+        ),
+    ],
+) -> ToolResult:
+    """记录用户选择并播放下一回合。"""
+    headers, session_key = _caller()
+    logger.info(
+        "submit_dialogue_choice choice=%s device=%s agent=%s session=%s",
+        choice,
+        headers.get("x-linx-device-id", ""),
+        headers.get("x-linx-agent-id", ""),
+        headers.get("x-linx-session-id", ""),
+    )
+    payload, is_error = record_dialogue_choice(session_key, choice)
+    return _game_result(payload, is_error=is_error)
 
 
 def _session_id(scope: Scope) -> str:

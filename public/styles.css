@@ -238,6 +238,20 @@ button.primary,
 
 .result { display: grid; gap: 12px; }
 
+.game-message {
+  margin: 0;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.choices { display: grid; gap: 8px; }
+
+.choices button {
+  width: 100%;
+  border-radius: 12px;
+  text-align: left;
+}
+
 .funcs { display: grid; gap: 8px; }
 
 .func {
